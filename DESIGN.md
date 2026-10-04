@@ -1,81 +1,77 @@
 # Diseño de la solución
 
-## 1. Cómo entendí el problema
+## 1. Requisitos
 
-El objetivo principal que tomé para este proyecto fue que una marca pueda definir reglas de despacho sin que el resultado dependa del orden en que esas reglas fueron creadas o consultadas.
+Para considerar exitosa la solución definí los siguientes requisitos:
 
-Para el prototipo me enfoqué principalmente en cuatro cosas:
+- Un mismo pedido, evaluado contra las mismas reglas, debe producir siempre el mismo resultado.
+- La marca debe poder expresar qué regla tiene mayor importancia cuando dos reglas intentan modificar el mismo resultado.
+- Dos reglas que coinciden pero modifican resultados diferentes deben poder aplicarse al mismo tiempo.
+- El resultado debe indicar los tipos de entrega disponibles, el precio del envío y el courier asignado.
+- La interfaz debe permitir visualizar reglas, crear nuevas reglas y simular pedidos.
+- Una regla inválida debe rechazarse antes de persistirse y la interfaz debe informar el problema.
+- Si ninguna regla coincide, el sistema debe entregar un resultado explícito en vez de elegir una regla arbitrariamente.
+- Cada simulación debe dejar un registro suficiente para explicar posteriormente qué reglas coincidieron, cuáles se aplicaron y por qué, sin tener que volver a ejecutar el motor.
 
-- poder crear y visualizar reglas;
-- poder probar esas reglas con un pedido;
-- resolver de forma clara cuando dos reglas entran en conflicto;
-- guardar suficiente información para poder explicar después por qué se tomó una decisión.
-
-Por alcance decidí trabajar con una condición por regla. Por ejemplo:
-
-```
-amount > 50000
-```
-
-o:
-
-```
-weight < 20
-```
-
-Esto mantiene el motor relativamente simple para el prototipo. Si el proyecto evolucionara, agregaría soporte para condiciones compuestas utilizando AND/OR.
+Para mantener acotado el prototipo decidí trabajar con una condición simple por regla.
 
 ---
 
-## 2. Arquitectura
+## 2. Solución propuesta
 
-Separé el proyecto en tres partes principales:
+Separé la solución en frontend, API, motor de reglas y persistencia:
 
+```text
+Pedido ingresado en React
+          |
+          v
+     React / Vite
+          |
+          | HTTP / JSON
+          v
+   Node.js / Express
+          |
+          v
+      Controller
+          |
+          +--------------------+
+          |                    |
+          v                    v
+     Rule Engine          PostgreSQL
+          |                    |
+          |              obtiene reglas
+          |                    |
+          +---------<----------+
+          |
+          v
+ Evaluar condiciones
+          |
+          v
+ Reglas coincidentes
+          |
+          v
+Resolver conflictos
+   por prioridad
+          |
+          v
+ Construir resultado
+    y explicación
+          |
+          v
+      PostgreSQL
+ simulations + decision_logs
+          |
+          v
+  Resultado hacia React
 ```
-       React
-         |
-         | HTTP / JSON
-         v
-   Node + Express
-         |
-         v
-     Rule Engine
-         |
-         v
-    PostgreSQL
-```
 
-React se ocupa de la interfaz.
+React se ocupa de la interacción con el usuario. Express expone la API y coordina los casos de uso. La decisión sobre qué reglas se aplican vive en el Rule Engine y PostgreSQL se utiliza para persistir reglas, simulaciones y trazabilidad.
 
-Express expone la API y coordina las operaciones.
+### Representación de reglas
 
-El Rule Engine contiene la lógica que determina qué reglas coinciden y cuáles finalmente se aplican.
+Una regla contiene principalmente:
 
-PostgreSQL almacena reglas, simulaciones y el historial de decisiones.
-
-Dentro del backend también intenté separar responsabilidades:
-
-```
-Route
-  |
-Controller
-  |
-Service / Rule Engine
-  |
-Repository
-  |
-PostgreSQL
-```
-
-La intención fue evitar tener consultas SQL, lógica de reglas y manejo HTTP mezclados en los mismos archivos.
-
----
-
-## 3. Cómo representé una regla
-
-Una regla tiene información como:
-
-```
+```text
 name
 priority
 condition
@@ -83,169 +79,125 @@ action
 enabled
 ```
 
-Decidí almacenar `condition` y `action` como JSONB.
+Elegí almacenar `condition` y `action` como JSONB.
 
-Por ejemplo, una condición puede ser:
-
-```json
-{
-  "field": "amount",
-  "operator": ">",
-  "value": 50000
-}
-```
-
-y su acción:
+Ejemplo:
 
 ```json
 {
-  "type": "ASSIGN_COURIER",
-  "value": "BLUE_EXPRESS"
+  "condition": {
+    "field": "amount",
+    "operator": ">",
+    "value": 50000
+  },
+  "action": {
+    "type": "ASSIGN_COURIER",
+    "value": "BLUE_EXPRESS"
+  }
 }
 ```
 
-Elegí esta alternativa porque para el prototipo necesitaba soportar distintos tipos de condiciones y acciones sin crear una gran cantidad de columnas que fueran opcionales dependiendo del tipo de regla.
+Elegí JSONB porque necesitaba representar distintos tipos de condiciones y acciones sin agregar muchas columnas opcionales al modelo. El costo de esta decisión es que parte de la validación queda en el backend.
 
-La desventaja es que PostgreSQL no puede validar por sí solo toda la estructura de esos objetos. Por eso parte de esa responsabilidad queda en el backend.
+### Evaluación y conflictos
 
----
+El motor obtiene las reglas habilitadas y evalúa cada condición contra el pedido.
 
-## 4. Cómo funciona el motor
-
-Cuando se simula un pedido, primero se cargan las reglas de la marca.
-
-Después el motor revisa las reglas habilitadas y evalúa cada condición contra el pedido.
-
-Por ejemplo, para:
-
-```
-Monto: 60000
-Peso: 2 kg
-```
-
-estas dos condiciones son verdaderas:
-
-```
-60000 > 50000
-2 < 20
-```
-
-Por lo tanto pueden coincidir tanto la regla de Blue Express como la de FedEx.
-
-Pero que dos reglas coincidan no significa necesariamente que estén en conflicto.
+Que dos reglas coincidan no significa necesariamente que exista un conflicto.
 
 Por ejemplo:
 
-```
+```text
 Asignar BLUE_EXPRESS
-```
-
-y:
-
-```
 Precio de envío = 0
 ```
 
-pueden aplicarse juntas porque modifican cosas diferentes.
+pueden aplicarse simultáneamente porque modifican resultados diferentes.
 
 En cambio:
 
-```
+```text
 Asignar BLUE_EXPRESS
 Asignar FEDEX
 ```
 
-sí genera un conflicto porque ambas intentan decidir el courier.
+sí genera un conflicto porque ambas reglas intentan asignar courier.
 
----
+Para expresar la intención de la marca agregué una prioridad numérica. La regla con mayor prioridad gana dentro de un mismo conflicto.
 
-## 5. Cómo resolví los conflictos
+En el caso principal:
 
-Para resolver un conflicto utilicé una prioridad numérica.
-
-Una prioridad mayor gana sobre una menor.
-
-En los datos de ejemplo:
-
-```
-Blue Express -> prioridad 100
-FedEx        -> prioridad 50
+```text
+Monto > 50000 -> BLUE_EXPRESS -> prioridad 100
+Peso < 20     -> FEDEX        -> prioridad 50
+Monto > 30000 -> precio = 0   -> prioridad 80
 ```
 
-Por eso, aunque las dos reglas coincidan, Blue Express es la que finalmente se aplica.
+Para un pedido de `$60.000` y `2 kg`, Blue Express y FedEx coinciden, pero Blue Express gana por prioridad. La regla de precio también se aplica porque no compite con la asignación de courier.
 
-También necesitaba una respuesta definida si dos reglas tienen exactamente la misma prioridad.
+Si dos reglas que compiten tienen la misma prioridad, utilizo el menor `id` como desempate. Lo elegí para garantizar determinismo en el prototipo, aunque en un producto real también mostraría una advertencia para que la marca resuelva explícitamente el empate.
 
-Para ese caso decidí utilizar el `id` menor como desempate.
+Para disponibilidad de tipos de entrega, el conflicto considera además qué alternativa se modifica. Por ejemplo, una regla que bloquea `STORE_PICKUP` y otra que bloquea `PICKUP_POINT` pueden convivir.
 
-No considero que sea necesariamente la política definitiva para un producto real, pero permite que el prototipo sea determinista: el mismo pedido y las mismas reglas deberían producir siempre el mismo resultado.
+### Trazabilidad
 
-También hice una distinción para las acciones que modifican disponibilidad de tipos de entrega.
+No guardo solamente el resultado final.
 
-Por ejemplo, bloquear `STORE_PICKUP` y bloquear `PICKUP_POINT` son acciones del mismo tipo, pero no deberían competir entre ellas porque afectan alternativas diferentes.
+Cada simulación genera un registro en `decision_logs` con:
 
----
-
-## 6. Trazabilidad
-
-Otro punto al que le di importancia fue no guardar solamente el resultado final.
-
-Cada vez que se ejecuta una simulación guardo en `decision_logs`:
-
-```
+```text
 input_snapshot
 matched_rules_snapshot
 result_snapshot
 ```
 
-Esto permite conservar una fotografía de lo que pasó.
+Esto permite conservar el contexto de una decisión aunque posteriormente cambien las reglas.
 
-Lo consideré importante porque las reglas pueden cambiar con el tiempo.
+### Lo que no resuelve el prototipo
 
-Por ejemplo, si hoy una regla tiene prioridad 100 y en el futuro alguien la modifica, no sería correcto intentar explicar una decisión antigua únicamente utilizando la versión actual de las reglas.
+Por alcance dejé fuera:
 
-Con los snapshots puedo consultar qué datos participaron realmente en la decisión original.
+- condiciones compuestas con AND/OR;
+- edición y versionado de reglas desde la interfaz;
+- autenticación;
+- manejo completo de múltiples marcas en el frontend;
+- cobertura completa de todas las posibles contradicciones semánticas;
+- tests automatizados.
 
----
-
-## 7. Validación de reglas
-
-Las reglas se validan antes de guardarse.
-
-El frontend ayuda a que el usuario introduzca valores válidos, pero decidí mantener la validación principal en el backend.
-
-Esto es importante porque la API también puede utilizarse sin pasar por React.
-
-Si una regla no es válida, el backend responde con un error y no se guarda en PostgreSQL.
-
-Durante las pruebas también agregué algunas validaciones entre el tipo de condición y la acción para evitar configuraciones que no tengan sentido dentro del alcance definido para el prototipo.
+La base ya relaciona las reglas mediante `brand_id`, pero la interfaz trabaja con una marca de demostración (`brandId = 1`).
 
 ---
 
-## 8. Decisiones 
+## 3. Riesgos
 
-Por el tiempo y el alcance de la prueba tuve que simplificar algunas partes.
+### Cambios sobre reglas existentes
+
+Un cambio en la lógica del motor podría modificar el comportamiento de reglas que las marcas ya tienen configuradas.
+
+**Mitigación:** versionaría las reglas o la política de evaluación antes de introducir cambios incompatibles. Antes de una migración validaría las reglas existentes y aquellas incompatibles quedarían marcadas para revisión en vez de eliminarlas o modificarlas silenciosamente.
+
+### Prioridades iguales
+
+Dos reglas pueden competir y tener la misma prioridad. Aunque el `id` garantiza un resultado determinista, puede que ese resultado no represente realmente la intención de la marca.
+
+**Mitigación:** mantendría el desempate determinista como protección técnica, pero el panel debería advertir los conflictos de igual prioridad para que la marca pueda resolverlos explícitamente.
+
+### Flexibilidad de JSONB
+
+JSONB permite representar distintos tipos de reglas de manera simple, pero el esquema de PostgreSQL no puede garantizar por sí solo toda la validez de `condition` y `action`.
+
+**Mitigación:** mantuve validación en el backend antes de persistir reglas. En una evolución agregaría validación más estricta, versionado del esquema de reglas y tests automatizados.
 
 ---
 
-## 9. Riesgos
+## 4. Uso de IA
 
-Uno de los principales riesgos es que un cambio en el motor termine modificando el comportamiento de reglas que ya fueron configuradas anteriormente.
+Utilicé IA como herramienta de apoyo durante el desarrollo de esta prueba. Principalmente la usé para analizar el enunciado, refrescar conceptos de Node.js, Express, PostgreSQL y React, discutir alternativas de arquitectura, obtener propuestas iniciales de código, entender errores durante la implementación y pensar casos de prueba.
 
-Por ejemplo, si cambia la forma en que se interpreta una prioridad o una acción, una regla existente podría comenzar a producir un resultado diferente.
+Las respuestas de IA las utilicé como punto de partida y fui probando las propuestas en el proyecto antes de mantenerlas.
 
-Para reducir este riesgo, en una versión productiva versionaría las reglas o la política de evaluación antes de introducir cambios importantes. Las reglas existentes también deberían validarse antes de una migración y, si alguna deja de ser compatible, preferiría marcarla para revisión en lugar de modificarla o eliminarla automáticamente.
+Un ejemplo de algo que modifiqué fue la resolución de conflictos. Inicialmente se propuso agrupar las reglas solamente por tipo de acción. Al revisar las acciones relacionadas con disponibilidad de entrega, noté que dos reglas podían ser del mismo tipo pero modificar alternativas distintas, por ejemplo `STORE_PICKUP` y `PICKUP_POINT`. En ese caso no deberían competir, por lo que ajusté el motor para que la clave de conflicto también considere el tipo de entrega afectado.
 
-Otro riesgo son las reglas que tienen la misma prioridad y compiten por el mismo resultado. El prototipo utiliza el ID como desempate para mantener un resultado determinista, pero idealmente el panel debería advertir esta situación para que la marca pueda definir su intención explícitamente.
+También descarté asumir que un retiro en tienda nunca puede utilizar courier. El enunciado indica que los pedidos de retiro pueden igualmente necesitar un courier para trasladarlos hasta el lugar de retiro, por lo que esa generalización no representaba correctamente el problema.
 
-Finalmente, el uso de JSONB da flexibilidad al modelo, pero hace que parte de la validación dependa del backend. Para reducir ese riesgo mantuve la validación al momento de crear reglas, y en una evolución agregaría tests automatizados y una validación más completa de la estructura.
-
----
-
-## 10. Uso de IA
-
-Utilicé IA como herramienta de apoyo durante el desarrollo de esta prueba.
-
-La usé principalmente para analizar el enunciado, recordar conceptos que no tenía completamente frescos de Node.js, Express, PostgreSQL y React, discutir alternativas de arquitectura y ayudarme a entender los errores que iban apareciendo mientras desarrollaba.
-
-También la utilicé para obtener propuestas iniciales de estructura y código, pensar casos de prueba y revisar 
+En general utilicé IA para acelerar el análisis y como apoyo mientras aprendía y desarrollaba. Las decisiones se fueron validando mediante la ejecución del prototipo y las pruebas realizadas.
