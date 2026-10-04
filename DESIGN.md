@@ -226,6 +226,26 @@ Durante las pruebas también agregué algunas validaciones entre el tipo de cond
 
 Por el tiempo y el alcance de la prueba tuve que simplificar algunas partes.
 
-### Una condición por regla
+---
 
-Actualmente una regla representa una condición sencilla.
+## 9. Riesgos
+
+Uno de los principales riesgos es que un cambio en el motor termine modificando el comportamiento de reglas que ya fueron configuradas anteriormente.
+
+Por ejemplo, si cambia la forma en que se interpreta una prioridad o una acción, una regla existente podría comenzar a producir un resultado diferente.
+
+Para reducir este riesgo, en una versión productiva versionaría las reglas o la política de evaluación antes de introducir cambios importantes. Las reglas existentes también deberían validarse antes de una migración y, si alguna deja de ser compatible, preferiría marcarla para revisión en lugar de modificarla o eliminarla automáticamente.
+
+Otro riesgo son las reglas que tienen la misma prioridad y compiten por el mismo resultado. El prototipo utiliza el ID como desempate para mantener un resultado determinista, pero idealmente el panel debería advertir esta situación para que la marca pueda definir su intención explícitamente.
+
+Finalmente, el uso de JSONB da flexibilidad al modelo, pero hace que parte de la validación dependa del backend. Para reducir ese riesgo mantuve la validación al momento de crear reglas, y en una evolución agregaría tests automatizados y una validación más completa de la estructura.
+
+---
+
+## 10. Uso de IA
+
+Utilicé IA como herramienta de apoyo durante el desarrollo de esta prueba.
+
+La usé principalmente para analizar el enunciado, recordar conceptos que no tenía completamente frescos de Node.js, Express, PostgreSQL y React, discutir alternativas de arquitectura y ayudarme a entender los errores que iban apareciendo mientras desarrollaba.
+
+También la utilicé para obtener propuestas iniciales de estructura y código, pensar casos de prueba y revisar 
